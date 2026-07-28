@@ -488,9 +488,16 @@ function enterDashboard() {
 
   switchTab('dashboard');
   loadDashboardData();
+  if (state._autoRefresh) clearInterval(state._autoRefresh);
+  state._autoRefresh = setInterval(function() {
+    if (state.role && !$('dashboard').classList.contains('hidden')) {
+      loadDashboardData();
+    }
+  }, 60000);
 }
 
 $('logoutBtn').addEventListener('click', function() {
+  if (state._autoRefresh) { clearInterval(state._autoRefresh); state._autoRefresh = null; }
   state.role = null; state.user = null; state.leads = []; state.vendedores = [];
   $('dashboard').classList.add('hidden');
   $('loginScreen').classList.remove('hidden');
