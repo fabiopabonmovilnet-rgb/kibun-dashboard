@@ -662,15 +662,14 @@ function renderChart(data) {
   var today = new Date(); today.setHours(23,59,59,999);
   var byDate = {};
   data.forEach(function(l) {
-    if (!l.fechaObj) return;
-    var d = new Date(l.fechaObj); d.setHours(0,0,0,0);
-    var key = d.toISOString().split('T')[0];
+    if (!l.fechaRaw) return;
+    var key = l.fechaRaw.substring(0, 10);
     byDate[key] = (byDate[key] || 0) + 1;
   });
   var days = [];
   for (var i = 13; i >= 0; i--) {
     var d = new Date(today); d.setDate(d.getDate() - i);
-    var key = d.toISOString().split('T')[0];
+    var key = getLocalDate(d);
     days.push({ date: d, key: key, count: byDate[key] || 0, label: d.toLocaleDateString('es-VE', { weekday:'short', day:'numeric' }) });
   }
   var maxCount = Math.max(1, ...days.map(function(d) { return d.count; }));
