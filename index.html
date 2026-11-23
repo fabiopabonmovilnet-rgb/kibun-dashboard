@@ -517,7 +517,9 @@ async function api(payload) {
     console.info('[api] API local inalcanzable, usando proxy de respaldo.');
     res = await fetchApi(LEGACY_PROXY_URL, payload, headers);
   }
-  if (res.status === 401 || res.status === 403) {
+  // 401/403 con token = sesión caída. Sin token (login) = credenciales inválidas:
+  // se devuelve el JSON para que el formulario muestre el error del servidor.
+  if ((res.status === 401 || res.status === 403) && state.token) {
     forceLogout('Tu sesión expiró o no es válida. Ingresa nuevamente.');
     throw new Error('Sesión expirada');
   }
