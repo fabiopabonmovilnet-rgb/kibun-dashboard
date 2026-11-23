@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>Panel Hyundai · Automotores Kibun</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
@@ -385,13 +386,10 @@ table.data-table tr:hover td { background: #f8fafc; }
 // CONFIG
 // ════════════════════════════════════════════════════════════════
 var API_PROXY_URL = 'https://golden-panda-ad9398.netlify.app/.netlify/functions/airtable-proxy';
+var SESSION_KEY = 'kibun_panel_session';
 
-// Admin credentials (hardcoded, only for master admin)
-var AUTH_ADMINS = [
-  { email: 'admin@automotoreskibun.com', pass: 'KibunAdmin2026' },
-  { email: 'fabiopabon.movilnet@gmail.com', pass: 'Fabio2026' }
-];
-
+// No hay credenciales en el cliente. El servidor valida admin/vendedores
+// y devuelve un token de sesión firmado con expiración.
 var ESTATUS_OPTS = ['Nuevo', 'Contactado', 'En seguimiento', 'Cerrado', 'Cancelado'];
 
 // ════════════════════════════════════════════════════════════════
@@ -400,6 +398,7 @@ var ESTATUS_OPTS = ['Nuevo', 'Contactado', 'En seguimiento', 'Cerrado', 'Cancela
 var state = {
   role: null,           // 'admin' | 'vendedor'
   user: null,           // email string (admin) or vendedor object
+  token: null,          // sesión firmada emitida por el proxy
   leads: [],
   vendedores: [],
   tab: 'dashboard'
@@ -409,6 +408,60 @@ var state = {
 // DOM
 // ════════════════════════════════════════════════════════════════
 var $ = function(id) { return document.getElementById(id); };
+
+// Llamadas autenticadas al proxy. El token viaja en Authorization: Bearer.
+function api(payload) {
+  var headers = { 'Content-Type': 'application/json' };
+  if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+  return fetch(API_PROXY_URL, {
+    method: 'POST', headers: headers, body: JSON.stringify(payload)
+  }).then(function(res) {
+    if (res.status === 401 || res.status === 403) {
+      forceLogout('Tu sesión expiró o no es válida. Ingresa nuevamente.');
+      throw new Error('Sesión expirada');
+    }
+    return res.json();
+  });
+}
+
+function saveSession() {
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+      token: state.token, role: state.role, user: state.user,
+      exp: Date.now() + 8 * 60 * 60 * 1000
+    }));
+  } catch (e) { /* sessionStorage puede estar deshabilitado */ }
+}
+function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+  state.token = null; state.role = null; state.user = null;
+  state.leads = []; state.vendedores = [];
+}
+function forceLogout(message) {
+  if (state._autoRefresh) { clearInterval(state._autoRefresh); state._autoRefresh = null; }
+  clearSession();
+  $('dashboard').classList.add('hidden');
+  $('loginScreen').classList.remove('hidden');
+  $('loginScreen').classList.add('show');
+  $('loginForm').reset();
+  $('loginBtn').disabled = false;
+  $('loginBtn').textContent = 'Ingresar';
+  $('loginError').textContent = '';
+  if (message) showToast(message, 'error');
+}
+function restoreSession() {
+  try {
+    var raw = sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return;
+    var s = JSON.parse(raw);
+    if (!s || !s.token || !s.exp || s.exp < Date.now() ||
+        (s.role !== 'admin' && s.role !== 'vendedor')) {
+      clearSession(); return;
+    }
+    state.token = s.token; state.role = s.role; state.user = s.user;
+    enterDashboard();
+  } catch (e) { clearSession(); }
+}
 
 // ════════════════════════════════════════════════════════════════
 // LOGIN
@@ -442,24 +495,23 @@ $('loginForm').addEventListener('submit', async function(e) {
 
   $('loginBtn').disabled = true;
   $('loginBtn').innerHTML = '<span class="spinner"></span> Verificando…';
-  await new Promise(function(r) { setTimeout(r, 400); });
 
   try {
     if (loginRole === 'admin') {
-      var match = AUTH_ADMINS.find(function(u) { return u.email === email && u.pass === pass; });
-      if (!match) { throw new Error('Credenciales inválidas.'); }
+      var json = await api({ operation: 'loginAdmin', email: email, pass: pass });
+      if (!json.success) throw new Error(json.error || 'Credenciales inválidas.');
       state.role = 'admin';
-      state.user = email;
+      state.user = json.user;
+      state.token = json.token;
     } else {
-      var res = await fetch(API_PROXY_URL, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation: 'validateVendedor', email: email, pin: pass })
-      });
-      var json = await res.json();
-      if (!json.success) { throw new Error(json.error || 'Error de autenticación'); }
+      var json = await api({ operation: 'validateVendedor', email: email, pin: pass });
+      if (!json.success) throw new Error(json.error || 'Error de autenticación');
       state.role = 'vendedor';
       state.user = json.vendedor;
+      state.token = json.token;
     }
+    if (!state.token) throw new Error('El servidor no devolvió una sesión válida.');
+    saveSession();
     enterDashboard();
   } catch (err) {
     $('loginError').textContent = err.message;
@@ -496,17 +548,7 @@ function enterDashboard() {
   }, 60000);
 }
 
-$('logoutBtn').addEventListener('click', function() {
-  if (state._autoRefresh) { clearInterval(state._autoRefresh); state._autoRefresh = null; }
-  state.role = null; state.user = null; state.leads = []; state.vendedores = [];
-  $('dashboard').classList.add('hidden');
-  $('loginScreen').classList.remove('hidden');
-  $('loginScreen').classList.add('show');
-  $('loginForm').reset();
-  $('loginBtn').disabled = false;
-  $('loginBtn').textContent = 'Ingresar';
-  $('loginError').textContent = '';
-});
+$('logoutBtn').addEventListener('click', function() { forceLogout(); });
 
 // ════════════════════════════════════════════════════════════════
 // TABS
@@ -542,11 +584,7 @@ async function loadDashboardData() {
     if (state.role === 'vendedor' && state.user && state.user.nombre) {
       body.asesor = state.user.nombre;
     }
-    var res = await fetch(API_PROXY_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-    });
-    if (!res.ok) throw new Error('Proxy responded ' + res.status);
-    var json = await res.json();
+    var json = await api(body);
     if (!json.success) throw new Error(json.error || 'Proxy error');
     state.leads = parseLeads(json.data.records || []);
 
@@ -578,11 +616,7 @@ async function loadVendedores() {
   $('vendedoresError').classList.add('hidden');
   $('vendedoresBody').innerHTML = '<tr><td colspan="6" style="text-align:center; padding:20px; color:#94a3b8;">Cargando…</td></tr>';
   try {
-    var res = await fetch(API_PROXY_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ operation: 'listVendedores' })
-    });
-    var json = await res.json();
+    var json = await api({ operation: 'listVendedores' });
     if (!json.success) throw new Error(json.error || 'Error');
     state.vendedores = json.vendedores || [];
     renderVendedoresTable();
@@ -717,7 +751,7 @@ function renderTable(data) {
     else badge = '<span class="badge badge-antes">Ant.</span>';
     var fmt = function(n) { return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
     var st = l.estatus || 'Nuevo';
-    var statusOpts = ESTATUS_OPTS.map(function(s) { return '<option value="' + s + '"' + (s === st ? ' selected' : '') + '>' + s + '</option>'; }).join('');
+    var statusOpts = ESTATUS_OPTS.map(function(s) { return '<option value="' + esc(s) + '"' + (s === st ? ' selected' : '') + '>' + esc(s) + '</option>'; }).join('');
     return '<tr>'
       + '<td>' + esc(l.cliente) + '</td>'
       + '<td>' + esc(l.cedula) + '</td>'
@@ -728,22 +762,21 @@ function renderTable(data) {
       + '<td style="max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="' + esc(l.plan) + '">' + esc(l.plan) + '</td>'
       + '<td>' + fmt(l.inicial) + '</td>'
       + '<td>' + fmt(l.cuota) + '</td>'
-      + '<td><select class="status-select status-' + st.replace(/ /g,'') + '" data-lead-id="' + l.id + '" onchange="updateLeadStatus(this, \'' + l.id + '\')">' + statusOpts + '</select></td>'
-      + '<td>' + l.fechaStr + ' ' + badge + '</td>'
+      + '<td><select class="status-select status-' + esc(st.replace(/ /g,'')) + '" data-lead-id="' + esc(l.id) + '">' + statusOpts + '</select></td>'
+      + '<td>' + esc(l.fechaStr) + ' ' + badge + '</td>'
       + '</tr>';
   }).join('');
   $('leadsTableBody').innerHTML = rows;
+  $('leadsTableBody').querySelectorAll('.status-select').forEach(function(sel) {
+    sel.addEventListener('change', function() { updateLeadStatus(sel, sel.dataset.leadId); });
+  });
 }
 
 async function updateLeadStatus(sel, leadId) {
   var newStatus = sel.value;
   sel.disabled = true;
   try {
-    var res = await fetch(API_PROXY_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ operation: 'updateLeadStatus', leadId: leadId, estatus: newStatus })
-    });
-    var json = await res.json();
+    var json = await api({ operation: 'updateLeadStatus', leadId: leadId, estatus: newStatus });
     if (!json.success) throw new Error(json.error);
     showToast('Estado actualizado: ' + newStatus, 'success');
     sel.className = 'status-select status-' + newStatus.replace(/ /g,'');
@@ -775,14 +808,24 @@ function renderVendedoresTable() {
       + '<td>' + (v.tienePin ? '✅ Sí' : '❌ No') + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + statusText + '</span></td>'
       + '<td style="white-space:nowrap;">'
-      +   '<button class="btn btn-sm btn-outline" onclick="openEditVendedor(\'' + v.id + '\')">Editar</button> '
-      +   '<button class="btn btn-sm btn-warning" onclick="openPinModal(\'' + v.id + '\',\'' + esc(v.nombre) + '\')">PIN</button> '
-      +   '<button class="btn btn-sm ' + (v.activo ? 'btn-danger' : 'btn-success') + '" onclick="toggleVendedor(\'' + v.id + '\',' + !v.activo + ')">' + (v.activo ? 'Desactivar' : 'Activar') + '</button>'
+      +   '<button class="btn btn-sm btn-outline" data-act="edit" data-v-id="' + esc(v.id) + '">Editar</button> '
+      +   '<button class="btn btn-sm btn-warning" data-act="pin" data-v-id="' + esc(v.id) + '" data-v-nombre="' + esc(v.nombre) + '">PIN</button> '
+      +   '<button class="btn btn-sm ' + (v.activo ? 'btn-danger' : 'btn-success') + '" data-act="toggle" data-v-id="' + esc(v.id) + '" data-v-new="' + (!v.activo) + '">' + (v.activo ? 'Desactivar' : 'Activar') + '</button>'
       + '</td>'
       + '</tr>';
   }).join('');
   $('vendedoresBody').innerHTML = rows || '<tr><td colspan="6" style="text-align:center; padding:20px; color:#94a3b8;">No hay vendedores registrados.</td></tr>';
 }
+
+// Acciones de vendedores: delegación de eventos (evita JS inline con datos dinámicos).
+$('vendedoresBody').addEventListener('click', function(e) {
+  var btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  var id = btn.dataset.vId;
+  if (btn.dataset.act === 'edit') openEditVendedor(id);
+  else if (btn.dataset.act === 'pin') openPinModal(id, btn.dataset.vNombre);
+  else if (btn.dataset.act === 'toggle') toggleVendedor(id, btn.dataset.vNew === 'true');
+});
 
 // ════════════════════════════════════════════════════════════════
 // VENDEDOR CRUD
@@ -806,26 +849,15 @@ $('vendedorForm').addEventListener('submit', async function(e) {
   try {
     if (id) {
       // Update
-      var res = await fetch(API_PROXY_URL, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation: 'updateVendedor', recordId: id, nombre: nombre, email: email, activo: activo, idVendedor: idVendedor })
-      });
-      var json = await res.json();
+      var json = await api({ operation: 'updateVendedor', recordId: id, nombre: nombre, email: email, activo: activo, idVendedor: idVendedor });
       if (!json.success) throw new Error(json.error || 'Error al actualizar');
       if (pin && pin.length >= 4) {
-        await fetch(API_PROXY_URL, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ operation: 'resetPinVendedor', recordId: id, newPin: pin })
-        });
+        await api({ operation: 'resetPinVendedor', recordId: id, newPin: pin });
       }
       showToast('Vendedor actualizado.', 'success');
     } else {
       // Add
-      var res = await fetch(API_PROXY_URL, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation: 'addVendedor', nombre: nombre, email: email, pin: pin || undefined, activo: activo, idVendedor: idVendedor })
-      });
-      var json = await res.json();
+      var json = await api({ operation: 'addVendedor', nombre: nombre, email: email, pin: pin || undefined, activo: activo, idVendedor: idVendedor });
       if (!json.success) throw new Error(json.error || 'Error al crear');
       showToast('Vendedor creado.', 'success');
     }
@@ -860,11 +892,7 @@ async function toggleVendedor(id, newState) {
   var v = state.vendedores.find(function(v) { return v.id === id; });
   if (!v) return;
   try {
-    var res = await fetch(API_PROXY_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ operation: 'updateVendedor', recordId: id, nombre: v.nombre, email: v.email, activo: newState, idVendedor: v.idVendedor })
-    });
-    var json = await res.json();
+    var json = await api({ operation: 'updateVendedor', recordId: id, nombre: v.nombre, email: v.email, activo: newState, idVendedor: v.idVendedor });
     if (!json.success) throw new Error(json.error);
     showToast(newState ? 'Vendedor activado.' : 'Vendedor desactivado.', 'success');
     loadVendedores();
@@ -890,11 +918,7 @@ $('pinForm').addEventListener('submit', async function(e) {
   $('pinModalSave').disabled = true;
   $('pinModalSave').innerHTML = '<span class="spinner"></span> Guardando…';
   try {
-    var res = await fetch(API_PROXY_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ operation: 'resetPinVendedor', recordId: id, newPin: pin })
-    });
-    var json = await res.json();
+    var json = await api({ operation: 'resetPinVendedor', recordId: id, newPin: pin });
     if (!json.success) throw new Error(json.error);
     showToast('PIN actualizado.', 'success');
     $('pinModal').classList.add('hidden');
@@ -934,7 +958,7 @@ $('btnExportPdf').addEventListener('click', async function() {
       return '<tr><td style="padding:3px 6px; border-bottom:1px solid #e2e8f0; font-size:7pt;">' + esc(l.cliente) + '</td>'
         + '<td style="padding:3px 6px; border-bottom:1px solid #e2e8f0; font-size:7pt;">' + esc(l.vehiculo) + '</td>'
         + '<td style="padding:3px 6px; border-bottom:1px solid #e2e8f0; font-size:7pt;">' + esc(l.asesor) + '</td>'
-        + '<td style="padding:3px 6px; border-bottom:1px solid #e2e8f0; font-size:7pt;">' + (l.estatus || 'Nuevo') + '</td>'
+        + '<td style="padding:3px 6px; border-bottom:1px solid #e2e8f0; font-size:7pt;">' + esc(l.estatus || 'Nuevo') + '</td>'
         + '<td style="padding:3px 6px; border-bottom:1px solid #e2e8f0; font-size:7pt;">' + fmt(l.inicial) + '</td>'
         + '<td style="padding:3px 6px; border-bottom:1px solid #e2e8f0; font-size:7pt;">' + l.fechaStr + '</td></tr>';
     }).join('');
@@ -947,8 +971,8 @@ $('btnExportPdf').addEventListener('click', async function() {
       + '<div style="display:flex; gap:6px; margin-bottom:10px;">'
       +   '<div style="flex:1; background:#f0f4ff; border-radius:4px; padding:6px 8px;"><div style="font-size:6pt; color:#475569; font-weight:600;">Total</div><div style="font-size:14pt; font-weight:800; color:#002C5F;">' + total + '</div></div>'
       +   '<div style="flex:1; background:#f0fdf4; border-radius:4px; padding:6px 8px;"><div style="font-size:6pt; color:#475569; font-weight:600;">Hoy</div><div style="font-size:14pt; font-weight:800; color:#059669;">' + hoy + '</div></div>'
-      +   '<div style="flex:1; background:#fffbeb; border-radius:4px; padding:6px 8px;"><div style="font-size:6pt; color:#475569; font-weight:600;">Vehículo Top</div><div style="font-size:8pt; font-weight:700; color:#b45309;">' + (topVeh.length ? topVeh[0][0] : '—') + '</div></div>'
-      +   '<div style="flex:1; background:#fef2f2; border-radius:4px; padding:6px 8px;"><div style="font-size:6pt; color:#475569; font-weight:600;">Asesor Top</div><div style="font-size:8pt; font-weight:700; color:#dc2626;">' + (topAse.length ? topAse[0][0] : '—') + '</div></div></div>'
+      +   '<div style="flex:1; background:#fffbeb; border-radius:4px; padding:6px 8px;"><div style="font-size:6pt; color:#475569; font-weight:600;">Vehículo Top</div><div style="font-size:8pt; font-weight:700; color:#b45309;">' + esc(topVeh.length ? topVeh[0][0] : '—') + '</div></div>'
+      +   '<div style="flex:1; background:#fef2f2; border-radius:4px; padding:6px 8px;"><div style="font-size:6pt; color:#475569; font-weight:600;">Asesor Top</div><div style="font-size:8pt; font-weight:700; color:#dc2626;">' + esc(topAse.length ? topAse[0][0] : '—') + '</div></div></div>'
       + '<table style="width:100%; border-collapse:collapse; font-size:7pt;">'
       + '<thead><tr style="background:#f8fafc;"><th style="padding:3px 6px; border-bottom:1.5px solid #cbd5e1; font-weight:600; color:#475569; text-align:left;">Cliente</th>'
       + '<th style="padding:3px 6px; border-bottom:1.5px solid #cbd5e1; font-weight:600; color:#475569; text-align:left;">Vehículo</th>'
@@ -994,6 +1018,10 @@ function showToast(msg, type) {
     setTimeout(function() { t.remove(); }, 300);
   }, 3500);
 }
+
+// Restaurar una sesión válida al recargar (las vistas privadas siguen protegidas
+// por el token que el proxy valida en cada solicitud).
+restoreSession();
 </script>
 </body>
 </html>
