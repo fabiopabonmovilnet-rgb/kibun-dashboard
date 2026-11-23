@@ -509,7 +509,7 @@ async function api(payload) {
   var res;
   try {
     res = await fetchApi(API_PROXY_URL, payload, headers);
-    if ([404, 502, 503, 504].indexOf(res.status) !== -1) {
+    if ([404, 405, 501, 502, 503, 504].indexOf(res.status) !== -1) {
       console.info('[api] API local no disponible (' + res.status + '), usando proxy de respaldo.');
       res = await fetchApi(LEGACY_PROXY_URL, payload, headers);
     }
