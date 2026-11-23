@@ -463,7 +463,11 @@ table.data-table tr:hover td { background: #f8fafc; }
 // ════════════════════════════════════════════════════════════════
 // CONFIG
 // ════════════════════════════════════════════════════════════════
-var API_PROXY_URL = '/api/airtable-proxy';
+// API propia del mismo dominio (VPS). Si no existe (GitHub Pages), se usa el
+// proxy histórico de Netlify como respaldo temporal hasta el corte definitivo.
+var API_PROXY_URL = window.KIBUN_API_URL || '/api/airtable-proxy';
+var LEGACY_PROXY_URL = window.KIBUN_LEGACY_PROXY_URL ||
+  'https://golden-panda-ad9398.netlify.app/.netlify/functions/airtable-proxy';
 var SIM_URL = window.KIBUN_SIM_URL || (window.location.origin + '/hyundai_proforma.html');
 var SESSION_KEY = 'kibun_panel_session';
 
@@ -491,18 +495,33 @@ var state = {
 var $ = function(id) { return document.getElementById(id); };
 
 // Llamadas autenticadas al proxy. El token viaja en Authorization: Bearer.
-function api(payload) {
+// Intenta primero la API del mismo dominio; si no está desplegada (GitHub Pages)
+// cae al proxy de Netlify. Nunca hace fallback en 401/403: eso es sesión inválida.
+function fetchApi(url, payload, headers) {
+  return fetch(url, {
+    method: 'POST', headers: headers, body: JSON.stringify(payload)
+  });
+}
+
+async function api(payload) {
   var headers = { 'Content-Type': 'application/json' };
   if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
-  return fetch(API_PROXY_URL, {
-    method: 'POST', headers: headers, body: JSON.stringify(payload)
-  }).then(function(res) {
-    if (res.status === 401 || res.status === 403) {
-      forceLogout('Tu sesión expiró o no es válida. Ingresa nuevamente.');
-      throw new Error('Sesión expirada');
+  var res;
+  try {
+    res = await fetchApi(API_PROXY_URL, payload, headers);
+    if ([404, 502, 503, 504].indexOf(res.status) !== -1) {
+      console.info('[api] API local no disponible (' + res.status + '), usando proxy de respaldo.');
+      res = await fetchApi(LEGACY_PROXY_URL, payload, headers);
     }
-    return res.json();
-  });
+  } catch (e) {
+    console.info('[api] API local inalcanzable, usando proxy de respaldo.');
+    res = await fetchApi(LEGACY_PROXY_URL, payload, headers);
+  }
+  if (res.status === 401 || res.status === 403) {
+    forceLogout('Tu sesión expiró o no es válida. Ingresa nuevamente.');
+    throw new Error('Sesión expirada');
+  }
+  return res.json();
 }
 
 function saveSession() {
